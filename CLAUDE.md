@@ -1,71 +1,107 @@
-# CLAUDE.md
+# MyRag - 项目文档
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 项目说明
 
-## Project Overview
+MyRag 是一个分布式多租户混合检索企业级 RAG 系统，采用自设计的密集 + 稀疏 + 知识图谱混合检索架构。
 
-分布式多租户混合检索企业级RAG系统 — a private, enterprise-grade RAG platform using a self-designed dense + sparse + knowledge-graph hybrid retrieval architecture. Targets government and finance intranet deployment scenarios requiring auditability, high concurrency, low hallucination, and strong compliance.
+## 文档导航
 
-## Tech Stack
+所有项目文档都存储在 `doc/` 目录下：
 
-Python, FastAPI, Milvus (distributed cluster), Elasticsearch, Neo4j, BGE-M3, Jina-Rerank, Redis, Celery, Docker, Prometheus
+### 📚 核心文档
 
-## Architecture (Key Design Decisions)
+| 文档 | 说明 |
+|------|------|
+| [README.md](doc/README.md) | 项目概述、快速开始、安装指南 |
+| [PROJECT_SUMMARY.md](doc/PROJECT_SUMMARY.md) | 项目完成总结 |
+| [DOCUMENTATION_INDEX_CN.md](doc/DOCUMENTATION_INDEX_CN.md) | 中文文档索引 |
 
-### 1. Adaptive Semantic Preprocessing Pipeline
-- Document hierarchy parsing with semantic boundary detection for chunking (not fixed-window)
-- Chunk size and overlap adapt dynamically based on heading levels, paragraph integrity, and semantic coherence
-- Structural noise reduction for tables, formulas, headers/footers
+### 🛠️ 开发文档
 
-### 2. Three-Way Hybrid Retrieval (Core Innovation)
-- **Dense vector retrieval** (semantic) via Milvus + BGE-M3 embeddings
-- **BM25 sparse retrieval** (keyword) via Elasticsearch
-- **Knowledge graph multi-hop retrieval** via Neo4j
-- **Dynamic weight fusion** algorithm: auto-detects short-entity queries vs. long-semantic-reasoning scenarios and adjusts weights accordingly, replacing static RRF weighting
+| 文档 | 说明 |
+|------|------|
+| [DEVELOPMENT_CN.md](doc/DEVELOPMENT_CN.md) | 开发指南（中文） |
+| [SETUP_GUIDE_CN.md](doc/SETUP_GUIDE_CN.md) | 环境设置指南（中文） |
+| [API_DOCUMENTATION_CN.md](doc/API_DOCUMENTATION_CN.md) | API 文档（中文） |
 
-### 3. Two-Level Staged Reranking & Hallucination Suppression
-- **Coarse ranker** (lightweight) → **Fine ranker** (high-precision, Jina-Rerank) on Top-50 candidates
-- Retrieval confidence scoring + cross-evidence conflict detection
-- All answers support source page-number traceability for compliance audits
+### 🐳 Docker 配置
 
-### 4. Distributed Multi-Tenant Isolation & Data Governance
-- Milvus sharded cluster with horizontal scaling; physical Collection isolation per tenant
-- Cold/hot tiered storage: hot documents in memory index, cold/archived documents on disk mapping
-- Incremental indexing, fragment merging, checkpoint resume (no full rebuilds)
+| 文档 | 说明 |
+|------|------|
+| [Docker/README_CN.md](doc/Docker/README_CN.md) | Docker 服务配置说明 |
 
-### 5. Production-Grade High Availability
-- Celery for async large-file parsing with circuit breaking, retry, and dead-letter queues
-- Redis multi-level cache: query cache, vector result cache, session cache
-- Prometheus-based full-link monitoring: retrieval latency, token consumption, recall rate, error rate
+### ❓ 问题解答
 
-## Development Commands
+| 文档 | 说明 |
+|------|------|
+| [FAQ_CN.md](doc/FAQ_CN.md) | 常见问题解答（中文） |
 
-> Codebase is in planning phase. Commands below are the expected structure based on the tech stack.
+### 📦 依赖管理
 
-```bash
-# Start all services
-docker compose up -d
+| 文档 | 说明 |
+|------|------|
+| [UV_GUIDE.md](doc/UV_GUIDE.md) | UV 包管理器使用指南 |
+| [pyproject.toml](doc/pyproject.toml) | 项目配置 |
+| [requirements.txt](doc/requirements.txt) | 生产依赖 |
+| [requirements-dev.txt](doc/requirements-dev.txt) | 开发依赖 |
 
-# Start FastAPI dev server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+### 🔧 实现详情
 
-# Run Celery worker
-celery -A app.tasks worker --loglevel=info --concurrency=4
+| 文档 | 说明 |
+|------|------|
+| [IMPLEMENTATION_SUMMARY.md](doc/IMPLEMENTATION_SUMMARY.md) | 实现总结 |
 
-# Run tests
-pytest
+---
 
-# Run a single test
-pytest tests/test_retrieval.py::test_hybrid_search -v
+## 快速开始
 
-# Lint
-ruff check .
+1. 查看 [README.md](doc/README.md) 了解项目
+2. 阅读 [SETUP_GUIDE_CN.md](doc/SETUP_GUIDE_CN.md) 设置开发环境
+3. 查看 [API_DOCUMENTATION_CN.md](doc/API_DOCUMENTATION_CN.md) 了解 API 使用
+4. 运行测试: `uv run test`
+
+---
+
+## 项目结构
+
+```
+MyRag/
+├── doc/                    # 文档目录
+│   ├── README.md
+│   ├── DEVELOPMENT_CN.md
+│   ├── API_DOCUMENTATION_CN.md
+│   ├── FAQ_CN.md
+│   └── ...
+├── app/                    # 核心应用代码
+├── tests/                  # 测试文件
+├── docker/                 # Docker 配置
+├── alembic/               # 数据库迁移
+├── dev.py                 # 开发脚本
+├── test_system.py         # 系统测试
+├── requirements.txt       # 生产依赖
+├── requirements-dev.txt   # 开发依赖
+└── pyproject.toml         # 项目配置
 ```
 
-## Key Constraints
+---
 
-- **Private deployment**: all components must run offline without external API calls
-- **Multi-tenant**: every operation is scoped to a tenant; physical isolation at the Milvus Collection level
-- **Auditability**: every answer links back to source document pages
-- **Performance target**: <300ms retrieval latency at million-document scale
-- **Concurrency**: 50+ simultaneous enterprise users
+## 技术栈
+
+- Python 3.11+
+- FastAPI
+- Milvus (向量数据库)
+- Elasticsearch (搜索引擎)
+- Neo4j (知识图谱)
+- Redis (缓存)
+- Celery (任务队列)
+- Prometheus + Grafana (监控)
+
+---
+
+## 许可证
+
+本项目为专有软件，保留所有权利。
+
+## 支持
+
+如有问题，请查看文档或联系开发团队。
