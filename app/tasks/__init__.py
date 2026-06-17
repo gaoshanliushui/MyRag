@@ -1,0 +1,1 @@
+"""Celery async tasks - document processing, indexing, tier management"""

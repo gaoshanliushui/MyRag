@@ -1,0 +1,1 @@
+"""Multi-Tenant Isolation - Collection/index isolation, cold/hot tiered storage"""
