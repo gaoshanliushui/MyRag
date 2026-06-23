@@ -37,7 +37,8 @@
 
 ### 5. 架构设计
 
-- **[CLAUDE.md](CLAUDE.md)** - 项目架构和设计决策
+- **[CLAUDE.md](../CLAUDE.md)** - 项目架构和设计决策
+- **[LANGCHAIN_INTEGRATION.md](LANGCHAIN_INTEGRATION.md)** - LangChain 集成说明（薄包装 facade 设计、新增/重构模块清单、LCEL 编排示例）
   - 适应性语义预处理
   - 三路混合检索
   - 两级分阶段重排序

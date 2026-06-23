@@ -474,3 +474,16 @@ class MilvusClient:
     async def delete_tenant_collections_async(self, tenant_id: str) -> None:
         """Async wrapper for tenant collection deletion."""
         return await self._run_sync(self.delete_tenant_collections, tenant_id)
+
+
+# Module-level singleton accessor
+_milvus_client: MilvusClient | None = None
+
+
+def get_milvus_client() -> MilvusClient:
+    """Return the process-wide `MilvusClient` singleton (lazily created)."""
+    global _milvus_client
+    if _milvus_client is None:
+        _milvus_client = MilvusClient()
+        _milvus_client.connect()
+    return _milvus_client

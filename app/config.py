@@ -6,10 +6,23 @@ Supports both local development and Docker deployment.
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import BeforeValidator, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _split_csv(v: object) -> object:
+    """BeforeValidator: turn a CSV string (or single string) into a list[str]."""
+    if isinstance(v, str):
+        if "," in v:
+            return [item.strip() for item in v.split(",") if item.strip()]
+        # Single value (no comma) — still wrap it in a list
+        return [v.strip()] if v.strip() else []
+    return v
+
+
+CommaSeparated = Annotated[list[str], BeforeValidator(_split_csv)]
 
 
 class Settings(BaseSettings):
@@ -19,6 +32,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        enable_decoding=False,  # let BeforeValidator handle CSV → list conversion
     )
 
     # Application
@@ -29,7 +43,7 @@ class Settings(BaseSettings):
 
     # API
     API_PREFIX: str = "/api/v1"
-    CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
+    CORS_ORIGINS: CommaSeparated = Field(default_factory=lambda: ["*"])
     API_KEY_HEADER: str = "X-API-Key"
 
     # PostgreSQL Database
@@ -44,7 +58,7 @@ class Settings(BaseSettings):
     MILVUS_ALIAS: str = "default"
 
     # Elasticsearch
-    ES_HOSTS: list[str] = Field(default_factory=lambda: ["http://localhost:9200"])
+    ES_HOSTS: CommaSeparated = Field(default_factory=lambda: ["http://localhost:9200"])
     ES_INDEX_PREFIX: str = "myrag"
     ES_USER: str = ""
     ES_PASSWORD: str = ""
@@ -66,7 +80,7 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
     CELERY_TASK_SERIALIZER: str = "json"
     CELERY_RESULT_SERIALIZER: str = "json"
-    CELERY_ACCEPT_CONTENT: list[str] = Field(default_factory=lambda: ["json"])
+    CELERY_ACCEPT_CONTENT: CommaSeparated = Field(default_factory=lambda: ["json"])
     CELERY_TASK_SOFT_TIME_LIMIT: int = 300  # 5 minutes
     CELERY_TASK_TIME_LIMIT: int = 600  # 10 minutes
     CELERY_MAX_RETRIES: int = 3
@@ -97,7 +111,7 @@ class Settings(BaseSettings):
     # Document Processing
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
-    ALLOWED_EXTENSIONS: list[str] = Field(
+    ALLOWED_EXTENSIONS: CommaSeparated = Field(
         default_factory=lambda: ["pdf", "docx", "doc", "txt", "html", "md"]
     )
 
@@ -149,22 +163,6 @@ class Settings(BaseSettings):
         """Ensure async driver is used."""
         if "postgresql://" in v and "asyncpg" not in v:
             return v.replace("postgresql://", "postgresql+asyncpg://")
-        return v
-
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def validate_cors_origins(cls, v: str | list[str]) -> list[str]:
-        """Parse CORS origins from string or list."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        return v
-
-    @field_validator("ES_HOSTS", mode="before")
-    @classmethod
-    def validate_es_hosts(cls, v: str | list[str]) -> list[str]:
-        """Parse ES hosts from string or list."""
-        if isinstance(v, str):
-            return [host.strip() for host in v.split(",")]
         return v
 
 

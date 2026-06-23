@@ -2,27 +2,46 @@
 Preprocessing Pipeline Orchestrator
 
 Coordinates the full preprocessing flow:
-1. Parse document (format-specific)
+1. Parse document (LangChain DocumentLoader, format-aware)
 2. Clean structural noise
-3. Chunk with semantic boundaries
-4. Generate embeddings
-5. Prepare for indexing
+3. Chunk with semantic boundaries (SemanticTextSplitter — a LangChain
+   `TextSplitter` subclass that wraps the project's existing
+   `SemanticChunker`)
+4. Generate embeddings (via `EmbeddingService` → LangChain `Embeddings`)
+5. Prepare for indexing (Milvus + Elasticsearch + Neo4j)
 """
 
 import asyncio
 import time
 from typing import Any
 
+from langchain_core.documents import Document
+
 from app.config import settings
 from app.core.monitoring.metrics import TASKS_TOTAL
-from app.core.preprocessing.parser import DocumentParser, ParsedDocument, get_parser
+from app.core.preprocessing.chunker import SemanticChunk, SemanticChunker, get_chunker
 from app.core.preprocessing.cleaner import StructuralCleaner, get_cleaner
-from app.core.preprocessing.chunker import SemanticChunker, SemanticChunk, get_chunker
+from app.core.preprocessing.loaders import load_document
+from app.core.preprocessing.parser import DocumentParser, ParsedDocument, get_parser
+from app.core.preprocessing.semantic_splitter import SemanticTextSplitter
 from app.utils.embeddings import get_embedding_service
 from app.utils.exceptions import DocumentProcessingError
 from app.utils.logging import get_logger
 
 logger = get_logger("core.preprocessing.pipeline")
+
+
+def _extract_page_number(metadata: dict[str, Any]) -> int | None:
+    """Best-effort page number extraction from LangChain Document metadata."""
+    if not metadata:
+        return None
+    for key in ("page", "page_number", "pageNumber"):
+        if key in metadata and metadata[key] is not None:
+            try:
+                return int(metadata[key])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 class PreprocessingResult:
@@ -87,6 +106,7 @@ class PreprocessingPipeline:
         document_id: str,
         tenant_id: str,
         progress_callback: Any | None = None,
+        use_langchain: bool = True,
     ) -> PreprocessingResult:
         """
         Run full preprocessing pipeline.
@@ -97,6 +117,9 @@ class PreprocessingPipeline:
             document_id: Document UUID
             tenant_id: Tenant UUID
             progress_callback: Optional callback for progress updates
+            use_langchain: When True (default), use LangChain DocumentLoader +
+                SemanticTextSplitter; falls back to the legacy parser/chunker
+                stack if the LangChain path raises.
 
         Returns:
             PreprocessingResult with chunks ready for indexing
@@ -109,43 +132,39 @@ class PreprocessingPipeline:
         )
 
         try:
-            # Stage 1: Parse
-            if progress_callback:
-                await progress_callback(0.1, "Parsing document")
+            chunks: list[SemanticChunk]
 
-            logger.info(f"[Stage 1] Parsing document: {file_path}")
-            parsed_doc = await self._parse_async(file_path, file_type)
-            result.total_pages = parsed_doc.total_pages
-            result.metadata = parsed_doc.metadata
-
-            TASKS_TOTAL.labels(task_name="parse", status="success").inc()
-
-            # Stage 2: Clean
-            if progress_callback:
-                await progress_callback(0.3, "Cleaning content")
-
-            logger.info(f"[Stage 2] Cleaning document: {parsed_doc.filename}")
-            cleaned_doc = await self._clean_async(parsed_doc)
-
-            TASKS_TOTAL.labels(task_name="clean", status="success").inc()
-
-            # Stage 3: Chunk
-            if progress_callback:
-                await progress_callback(0.5, "Chunking content")
-
-            logger.info(f"[Stage 3] Chunking document: {cleaned_doc.filename}")
-            chunks = await self._chunk_async(cleaned_doc, tenant_id)
-
-            TASKS_TOTAL.labels(task_name="chunk", status="success").inc()
-
-            # Stage 4: Generate embeddings (batch)
-            if progress_callback:
-                await progress_callback(0.7, "Generating embeddings")
-
-            logger.info(f"[Stage 4] Generating embeddings for {len(chunks)} chunks")
-            await self._embed_batch_async(chunks, tenant_id)
-
-            TASKS_TOTAL.labels(task_name="embed", status="success").inc()
+            if use_langchain:
+                try:
+                    chunks = await self._process_via_langchain(
+                        file_path=file_path,
+                        file_type=file_type,
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        progress_callback=progress_callback,
+                    )
+                except Exception as lc_exc:
+                    logger.warning(
+                        f"LangChain preprocessing failed ({lc_exc}); "
+                        "falling back to legacy parser/chunker"
+                    )
+                    chunks = await self._process_legacy(
+                        file_path=file_path,
+                        file_type=file_type,
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        progress_callback=progress_callback,
+                        result=result,
+                    )
+            else:
+                chunks = await self._process_legacy(
+                    file_path=file_path,
+                    file_type=file_type,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    progress_callback=progress_callback,
+                    result=result,
+                )
 
             # Stage 5: Prepare for indexing
             if progress_callback:
@@ -194,6 +213,114 @@ class PreprocessingPipeline:
             file_path,
             file_type,
         )
+
+    async def _process_via_langchain(
+        self,
+        *,
+        file_path: str,
+        file_type: str,
+        tenant_id: str,
+        document_id: str,
+        progress_callback: Any | None,
+    ) -> list[SemanticChunk]:
+        """LangChain-native pipeline: Loader → Cleaner → SemanticTextSplitter → Embed."""
+        from pathlib import Path
+
+        filename = Path(file_path).name
+
+        # Stage 1: LangChain loader
+        if progress_callback:
+            await progress_callback(0.1, "Parsing document (LangChain)")
+        loop = asyncio.get_event_loop()
+        lc_docs: list[Document] = await loop.run_in_executor(
+            None, load_document, file_path, file_type
+        )
+        TASKS_TOTAL.labels(task_name="parse", status="success").inc()
+
+        # Stage 2: Clean (apply structural cleaner to each LangChain Document)
+        if progress_callback:
+            await progress_callback(0.3, "Cleaning content")
+        cleaned_docs: list[Document] = []
+        for d in lc_docs:
+            cleaned_text = self.cleaner.clean_content(
+                d.page_content, section_type="text"
+            )
+            if cleaned_text:
+                cleaned_docs.append(
+                    Document(page_content=cleaned_text, metadata=d.metadata)
+                )
+        TASKS_TOTAL.labels(task_name="clean", status="success").inc()
+
+        # Stage 3: LangChain-aware semantic splitter
+        if progress_callback:
+            await progress_callback(0.5, "Chunking content (SemanticTextSplitter)")
+        splitter = SemanticTextSplitter()
+        split_docs = splitter.split_documents(cleaned_docs)
+
+        # Build SemanticChunk objects (the rest of the pipeline expects this shape)
+        chunks: list[SemanticChunk] = []
+        for i, d in enumerate(split_docs):
+            chunk = SemanticChunk(
+                content=d.page_content,
+                chunk_index=i,
+                page_number=_extract_page_number(d.metadata),
+                chunk_type=str(d.metadata.get("chunk_type", "text")),
+                heading_text=d.metadata.get("heading_text"),
+                token_count=self.chunker.estimate_tokens(d.page_content),
+            )
+            chunk.chunk_metadata["source_filename"] = filename
+            chunk.chunk_metadata["document_id"] = document_id
+            chunks.append(chunk)
+        TASKS_TOTAL.labels(task_name="chunk", status="success").inc()
+
+        # Stage 4: Batch embeddings (delegates to LangChain Embeddings)
+        if progress_callback:
+            await progress_callback(0.7, "Generating embeddings")
+        await self._embed_batch_async(chunks, tenant_id)
+        TASKS_TOTAL.labels(task_name="embed", status="success").inc()
+
+        return chunks
+
+    async def _process_legacy(
+        self,
+        *,
+        file_path: str,
+        file_type: str,
+        tenant_id: str,
+        document_id: str,
+        progress_callback: Any | None,
+        result: "PreprocessingResult",
+    ) -> list[SemanticChunk]:
+        """Legacy pipeline (preserved for fallback / existing tests)."""
+        # Stage 1: Parse
+        if progress_callback:
+            await progress_callback(0.1, "Parsing document")
+        parsed_doc = await self._parse_async(file_path, file_type)
+        result.total_pages = parsed_doc.total_pages
+        result.metadata = parsed_doc.metadata
+        TASKS_TOTAL.labels(task_name="parse", status="success").inc()
+
+        # Stage 2: Clean
+        if progress_callback:
+            await progress_callback(0.3, "Cleaning content")
+        cleaned_doc = await self._clean_async(parsed_doc)
+        TASKS_TOTAL.labels(task_name="clean", status="success").inc()
+
+        # Stage 3: Chunk
+        if progress_callback:
+            await progress_callback(0.5, "Chunking content")
+        chunks = await self._chunk_async(cleaned_doc, tenant_id)
+        TASKS_TOTAL.labels(task_name="chunk", status="success").inc()
+
+        # Stage 4: Generate embeddings (batch)
+        if progress_callback:
+            await progress_callback(0.7, "Generating embeddings")
+        await self._embed_batch_async(chunks, tenant_id)
+        TASKS_TOTAL.labels(task_name="embed", status="success").inc()
+
+        for c in chunks:
+            c.chunk_metadata.setdefault("document_id", document_id)
+        return chunks
 
     async def _clean_async(
         self,

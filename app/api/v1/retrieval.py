@@ -222,11 +222,9 @@ async def question_answer(
             if r.chunk.confidence and r.chunk.confidence >= threshold
         ]
 
-    # Build context for LLM
-    context_chunks = []
+    # Build sources list for the response payload (citations)
     sources = []
     for result in search_response.results[:5]:  # Top 5 for context
-        context_chunks.append(result.chunk.content)
         sources.append(QASource(
             document_id=result.source.document_id,
             document_name=result.source.document_name,
@@ -236,25 +234,18 @@ async def question_answer(
             relevance_score=result.source.score,
         ))
 
-    # Generate answer using LLM
-    from app.core.llm.provider import LLMProvider
-    llm = LLMProvider()
+    # Generate answer using the LangChain LCEL QA chain.
+    # The chain encapsulates: ensemble retrieval → context formatting →
+    # prompt template → chat model → string output.
+    from app.core.chains.qa_chain import build_qa_chain
+    from app.core.retrieval.fusion import DynamicWeightFusion
 
-    context_text = "\n\n---\n\n".join(context_chunks)
-    prompt = f"""基于以下参考文档回答问题。如果参考文档中没有相关信息，请说明"根据提供的文档，无法回答此问题"。
+    fusion_engine = DynamicWeightFusion()
+    weights = fusion_engine.compute_weights(request.question)
+    chain = build_qa_chain(tenant, weights=weights, top_k=request.top_k)
 
-参考文档：
-{context_text}
-
-问题：{request.question}
-
-请提供准确、简洁的回答，并引用来源页码。"""
-
-    answer, model_used = await llm.generate(
-        prompt=prompt,
-        max_tokens=settings.LLM_MAX_TOKENS,
-        temperature=settings.LLM_TEMPERATURE,
-    )
+    answer = await chain.ainvoke(request.question)
+    model_used = settings.LLM_MODEL
 
     # Calculate overall confidence
     confidence = 0.0
